@@ -1,3 +1,4 @@
+import './polyfills';
 import { BlurView } from 'expo-blur';
 import { useFonts } from 'expo-font';
 import {

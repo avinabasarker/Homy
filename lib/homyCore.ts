@@ -1,3 +1,4 @@
+import './polyfills';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { createClient, type SupabaseClient } from '@supabase/supabase-js';
 import * as ExpoCrypto from 'expo-crypto';
