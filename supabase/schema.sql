@@ -1,350 +1,327 @@
--- Homy Supabase schema for the closed-circle E2EE messenger
--- Free tier compatible: users + keys + backups, no paid add-ons required.
+-- ================================================================
+-- HOMY v2 — LOCKED-DOWN SCHEMA
+-- RLS on every table. auth.uid() everywhere. No open policies.
+-- ================================================================
 
-create table if not exists public.users (
-  id text primary key,
-  username text not null unique,
-  -- Authentication secrets stay in the encrypted local database. These nullable
-  -- columns are retained only for migration compatibility with the early schema.
-  password_hash text,
-  pin_hash text,
-  recovery_phrase text,
-  created_at timestamptz not null default now(),
-  updated_at timestamptz not null default now(),
-  last_seen_at timestamptz default now()
+-- ---------- 1) TABLES ----------
+
+create table public.profiles (
+  id         uuid primary key references auth.users (id) on delete cascade,
+  username   text not null unique check (username ~ '^[a-z0-9_]{3,20}$'),
+  bio        text not null default '' check (char_length(bio) <= 160),
+  created_at timestamptz not null default now()
 );
 
-create table if not exists public.public_keys (
-  id text primary key,
-  user_id text not null references public.users(id) on delete cascade,
-  device_id text not null,
-  public_key bytea not null,
-  created_at timestamptz not null default now(),
-  unique(user_id, device_id)
+create table public.public_keys (
+  user_id      uuid primary key references auth.users (id) on delete cascade,
+  identity_key bytea not null,
+  updated_at   timestamptz not null default now()
 );
 
-create table if not exists public.prekeys (
-  id text primary key,
-  user_id text not null references public.users(id) on delete cascade,
-  key_id text not null,
-  public_key bytea not null,
-  created_at timestamptz not null default now(),
-  unique(user_id, key_id)
+create table public.prekeys (
+  id         uuid primary key default gen_random_uuid(),
+  user_id    uuid not null references auth.users (id) on delete cascade,
+  prekey     bytea not null,
+  created_at timestamptz not null default now()
 );
 
-create table if not exists public.encrypted_backups (
-  id text primary key,
-  user_id text not null references public.users(id) on delete cascade,
-  device_id text not null,
-  backup_blob bytea not null,
-  created_at timestamptz not null default now(),
-  unique(user_id, device_id)
-);
-
-create table if not exists public.friend_requests (
-  id text primary key,
-  requester_id text not null references public.users(id) on delete cascade,
-  recipient_id text not null references public.users(id) on delete cascade,
-  status text not null default 'pending' check (status in ('pending', 'accepted', 'rejected')),
-  created_at timestamptz not null default now(),
-  responded_at timestamptz,
-  unique(requester_id, recipient_id),
+create table public.friend_requests (
+  id           uuid primary key default gen_random_uuid(),
+  requester_id uuid not null references auth.users (id) on delete cascade,
+  recipient_id uuid not null references auth.users (id) on delete cascade,
+  status       text not null default 'pending'
+               check (status in ('pending', 'accepted', 'rejected')),
+  created_at   timestamptz not null default now(),
+  updated_at   timestamptz not null default now(),
+  unique (requester_id, recipient_id),
   check (requester_id <> recipient_id)
 );
 
-create table if not exists public.conversations (
-  id text primary key,
-  user_a text not null references public.users(id) on delete cascade,
-  user_b text not null references public.users(id) on delete cascade,
-  last_message text,
-  updated_at timestamptz not null default now(),
-  unique(user_a, user_b)
+create table public.conversations (
+  id         uuid primary key default gen_random_uuid(),
+  user_a     uuid not null references auth.users (id) on delete cascade,
+  user_b     uuid not null references auth.users (id) on delete cascade,
+  created_at timestamptz not null default now(),
+  unique (user_a, user_b),
+  check (user_a <= user_b)   -- canonical order; self-chat allowed (a = b)
 );
 
-create table if not exists public.messages (
-  id text primary key,
-  conversation_id text not null references public.conversations(id) on delete cascade,
-  sender_id text not null references public.users(id) on delete cascade,
-  recipient_id text not null references public.users(id) on delete cascade,
+create table public.messages (
+  id              uuid primary key default gen_random_uuid(),
+  conversation_id uuid not null references public.conversations (id) on delete cascade,
+  sender_id       uuid not null references auth.users (id) on delete cascade,
+  ciphertext      bytea not null,
+  nonce           bytea not null,
+  sent_at         timestamptz not null default now(),
+  edited_at       timestamptz,
+  deleted_at      timestamptz
+);
+
+create table public.read_receipts (
+  id              uuid primary key default gen_random_uuid(),
+  message_id      uuid not null references public.messages (id) on delete cascade,
+  conversation_id uuid not null references public.conversations (id) on delete cascade,
+  reader_id       uuid not null references auth.users (id) on delete cascade,
+  read_at         timestamptz not null default now(),
+  unique (message_id, reader_id)
+);
+
+create table public.typing_events (
+  conversation_id uuid not null references public.conversations (id) on delete cascade,
+  user_id         uuid not null references auth.users (id) on delete cascade,
+  typing          boolean not null default true,
+  updated_at      timestamptz not null default now(),
+  primary key (conversation_id, user_id)
+);
+
+create table public.presence (
+  user_id   uuid primary key references auth.users (id) on delete cascade,
+  online    boolean not null default false,
+  last_seen timestamptz not null default now()
+);
+
+create table public.encrypted_backups (
+  user_id    uuid primary key references auth.users (id) on delete cascade,
   ciphertext bytea not null,
-  nonce bytea not null,
-  x3dh_ephemeral_public_key bytea,
-  x3dh_prekey_id text,
-  sent_at timestamptz not null default now(),
-  edited_at timestamptz,
-  deleted_for_everyone boolean not null default false,
-  disappearing_mode text not null default 'off'
+  updated_at timestamptz not null default now()
 );
 
-alter table public.messages add column if not exists x3dh_ephemeral_public_key bytea;
-alter table public.messages add column if not exists x3dh_prekey_id text;
+-- ---------- 2) INDEXES + HELPER FUNCTIONS ----------
 
-create table if not exists public.presence (
-  user_id text primary key references public.users(id) on delete cascade,
-  status text not null default 'offline',
-  last_seen_at timestamptz not null default now()
-);
+create index messages_conv_idx      on public.messages (conversation_id, sent_at desc);
+create index friend_requests_in_idx on public.friend_requests (recipient_id, status);
+create index prekeys_user_idx       on public.prekeys (user_id);
 
-create table if not exists public.typing_events (
-  id text primary key,
-  conversation_id text not null references public.conversations(id) on delete cascade,
-  user_id text not null references public.users(id) on delete cascade,
-  is_typing boolean not null default false,
-  updated_at timestamptz not null default now(),
-  unique(conversation_id, user_id)
-);
+-- Who are my friends? (bypasses RLS internally, callable only when logged in)
+create or replace function public.are_friends(a uuid, b uuid)
+returns boolean
+language sql stable security definer set search_path = public
+as $$   select exists (
+    select 1 from public.friend_requests fr
+    where fr.status = 'accepted'
+      and ((fr.requester_id = a and fr.recipient_id = b)
+        or (fr.requester_id = b and fr.recipient_id = a))
+  );
+ $$;
 
-create table if not exists public.read_receipts (
-  id text primary key,
-  message_id text not null references public.messages(id) on delete cascade,
-  user_id text not null references public.users(id) on delete cascade,
-  read_at timestamptz not null default now(),
-  unique(message_id, user_id)
-);
+-- Am I in this conversation? (used to guard messages, receipts, typing)
+create or replace function public.is_participant(p_conversation uuid, p_user uuid)
+returns boolean
+language sql stable security definer set search_path = public
+as $$   select exists (
+    select 1 from public.conversations c
+    where c.id = p_conversation and p_user in (c.user_a, c.user_b)
+  );
+ $$;
 
-create or replace function public.set_updated_at()
-returns trigger as $$
-begin
-  new.updated_at = now();
+-- Username availability check for the signup screen (safe for logged-out users)
+create or replace function public.username_available(p_username text)
+returns boolean
+language sql stable security definer set search_path = public
+as $$   select not exists (
+    select 1 from public.profiles p where p.username = lower(p_username)
+  );
+ $$;
+
+-- Auto-create a profile when a user signs up (username comes from signup metadata)
+create or replace function public.handle_new_user()
+returns trigger
+language plpgsql security definer set search_path = public
+as $$ begin
+  insert into public.profiles (id, username)
+  values (new.id, lower(new.raw_user_meta_data ->> 'username'));
   return new;
 end;
-$$ language plpgsql;
+ $$;
 
-drop trigger if exists users_updated_at on public.users;
-create trigger users_updated_at
-before update on public.users
-for each row
-execute function public.set_updated_at();
+create trigger on_auth_user_created
+  after insert on auth.users
+  for each row execute function public.handle_new_user();
 
-drop trigger if exists conversations_updated_at on public.conversations;
-create trigger conversations_updated_at
-before update on public.conversations
-for each row
-execute function public.set_updated_at();
+-- Functions are executable by public by default — lock that down
+revoke execute on function public.are_friends(uuid, uuid) from public, anon;
+revoke execute on function public.is_participant(uuid, uuid) from public, anon;
+revoke execute on function public.handle_new_user() from public, anon;
+revoke execute on function public.username_available(text) from public;
+grant execute on function public.are_friends(uuid, uuid) to authenticated;
+grant execute on function public.is_participant(uuid, uuid) to authenticated;
+grant execute on function public.username_available(text) to anon, authenticated;
 
-create index if not exists users_username_idx on public.users (username);
-create index if not exists public_keys_user_idx on public.public_keys (user_id);
-create index if not exists prekeys_user_idx on public.prekeys (user_id);
-create index if not exists encrypted_backups_user_idx on public.encrypted_backups (user_id);
-create index if not exists friend_requests_recipient_idx on public.friend_requests (recipient_id, status, created_at desc);
-create index if not exists friend_requests_requester_idx on public.friend_requests (requester_id, status, created_at desc);
-create index if not exists messages_conversation_idx on public.messages (conversation_id, sent_at desc);
-create index if not exists typing_events_conversation_idx on public.typing_events (conversation_id, updated_at desc);
-create index if not exists read_receipts_message_idx on public.read_receipts (message_id, read_at desc);
+-- ---------- 3) ENABLE RLS ON EVERYTHING ----------
 
--- Phase 2 bootstrap RLS:
--- Keep RLS enabled for safety, but allow app setup actions via anon/authenticated keys.
-alter table public.users enable row level security;
-alter table public.public_keys enable row level security;
-alter table public.prekeys enable row level security;
+alter table public.profiles          enable row level security;
+alter table public.public_keys       enable row level security;
+alter table public.prekeys           enable row level security;
+alter table public.friend_requests   enable row level security;
+alter table public.conversations     enable row level security;
+alter table public.messages          enable row level security;
+alter table public.read_receipts     enable row level security;
+alter table public.typing_events     enable row level security;
+alter table public.presence          enable row level security;
 alter table public.encrypted_backups enable row level security;
-alter table public.friend_requests enable row level security;
-alter table public.conversations enable row level security;
-alter table public.messages enable row level security;
-alter table public.presence enable row level security;
-alter table public.typing_events enable row level security;
-alter table public.read_receipts enable row level security;
 
-drop policy if exists users_select_bootstrap on public.users;
-drop policy if exists users_insert_bootstrap on public.users;
-drop policy if exists users_update_bootstrap on public.users;
-drop policy if exists public_keys_select_bootstrap on public.public_keys;
-drop policy if exists public_keys_insert_bootstrap on public.public_keys;
-drop policy if exists public_keys_update_bootstrap on public.public_keys;
-drop policy if exists prekeys_select_bootstrap on public.prekeys;
-drop policy if exists prekeys_insert_bootstrap on public.prekeys;
-drop policy if exists prekeys_update_bootstrap on public.prekeys;
-drop policy if exists conversations_select_bootstrap on public.conversations;
-drop policy if exists conversations_insert_bootstrap on public.conversations;
-drop policy if exists conversations_update_bootstrap on public.conversations;
-drop policy if exists messages_select_bootstrap on public.messages;
-drop policy if exists messages_insert_bootstrap on public.messages;
-drop policy if exists messages_update_bootstrap on public.messages;
-drop policy if exists presence_select_bootstrap on public.presence;
-drop policy if exists presence_insert_bootstrap on public.presence;
-drop policy if exists presence_update_bootstrap on public.presence;
-drop policy if exists typing_events_select_bootstrap on public.typing_events;
-drop policy if exists typing_events_insert_bootstrap on public.typing_events;
-drop policy if exists typing_events_update_bootstrap on public.typing_events;
-drop policy if exists read_receipts_select_bootstrap on public.read_receipts;
-drop policy if exists read_receipts_insert_bootstrap on public.read_receipts;
-drop policy if exists read_receipts_update_bootstrap on public.read_receipts;
-drop policy if exists friend_requests_select_bootstrap on public.friend_requests;
-drop policy if exists friend_requests_insert_bootstrap on public.friend_requests;
-drop policy if exists friend_requests_update_bootstrap on public.friend_requests;
+-- ---------- 4) POLICIES (auth.uid() everywhere; no open policies) ----------
 
-create policy users_select_bootstrap
-on public.users
-for select
-to anon, authenticated
-using (true);
+-- profiles: the username directory (no secrets here)
+create policy "profiles_select" on public.profiles
+  for select to authenticated
+  using (auth.uid() is not null);
 
-create policy users_insert_bootstrap
-on public.users
-for insert
-to anon, authenticated
-with check (true);
+create policy "profiles_insert_self" on public.profiles
+  for insert to authenticated
+  with check (auth.uid() = id);
 
-create policy users_update_bootstrap
-on public.users
-for update
-to anon, authenticated
-using (true)
-with check (true);
+create policy "profiles_update_self" on public.profiles
+  for update to authenticated
+  using (auth.uid() = id)
+  with check (auth.uid() = id);
 
-create policy public_keys_select_bootstrap
-on public.public_keys
-for select
-to anon, authenticated
-using (true);
+-- public keys / prekeys: anyone logged in can read (needed for key exchange);
+-- you can only publish your own
+create policy "keys_select" on public.public_keys
+  for select to authenticated
+  using (auth.uid() is not null);
 
-create policy public_keys_insert_bootstrap
-on public.public_keys
-for insert
-to anon, authenticated
-with check (true);
+create policy "keys_insert_own" on public.public_keys
+  for insert to authenticated
+  with check (auth.uid() = user_id);
 
-create policy friend_requests_select_bootstrap
-on public.friend_requests
-for select
-to anon, authenticated
-using (true);
+create policy "keys_update_own" on public.public_keys
+  for update to authenticated
+  using (auth.uid() = user_id)
+  with check (auth.uid() = user_id);
 
-create policy friend_requests_insert_bootstrap
-on public.friend_requests
-for insert
-to anon, authenticated
-with check (requester_id <> recipient_id);
+create policy "prekeys_select" on public.prekeys
+  for select to authenticated
+  using (auth.uid() is not null);
 
-create policy friend_requests_update_bootstrap
-on public.friend_requests
-for update
-to anon, authenticated
-using (true)
-with check (status in ('pending', 'accepted', 'rejected'));
+create policy "prekeys_insert_own" on public.prekeys
+  for insert to authenticated
+  with check (auth.uid() = user_id);
 
-create policy public_keys_update_bootstrap
-on public.public_keys
-for update
-to anon, authenticated
-using (true)
-with check (true);
+create policy "prekeys_delete_own" on public.prekeys
+  for delete to authenticated
+  using (auth.uid() = user_id);
 
-create policy prekeys_select_bootstrap
-on public.prekeys
-for select
-to anon, authenticated
-using (true);
+-- friend requests: visible to the two people involved, nobody else
+create policy "fr_select" on public.friend_requests
+  for select to authenticated
+  using (auth.uid() = requester_id or auth.uid() = recipient_id);
 
-create policy prekeys_insert_bootstrap
-on public.prekeys
-for insert
-to anon, authenticated
-with check (true);
+create policy "fr_insert" on public.friend_requests
+  for insert to authenticated
+  with check (auth.uid() = requester_id and status = 'pending');
 
-create policy prekeys_update_bootstrap
-on public.prekeys
-for update
-to anon, authenticated
-using (true)
-with check (true);
+create policy "fr_update_recipient" on public.friend_requests
+  for update to authenticated
+  using (auth.uid() = recipient_id and status = 'pending')
+  with check (auth.uid() = recipient_id and status in ('accepted', 'rejected'));
 
-create policy conversations_select_bootstrap
-on public.conversations
-for select
-to anon, authenticated
-using (true);
+create policy "fr_delete" on public.friend_requests
+  for delete to authenticated
+  using (auth.uid() = requester_id or auth.uid() = recipient_id);
 
-create policy conversations_insert_bootstrap
-on public.conversations
-for insert
-to anon, authenticated
-with check (true);
+-- conversations: participants only; creating one requires being in it,
+-- canonical ordering, and (for two different people) an accepted friendship
+create policy "conversations_select" on public.conversations
+  for select to authenticated
+  using (auth.uid() = user_a or auth.uid() = user_b);
 
-create policy conversations_update_bootstrap
-on public.conversations
-for update
-to anon, authenticated
-using (true)
-with check (true);
+create policy "conversations_insert" on public.conversations
+  for insert to authenticated
+  with check (
+    (auth.uid() = user_a or auth.uid() = user_b)
+    and user_a <= user_b
+    and (user_a = user_b or are_friends(user_a, user_b))
+  );
 
-create policy messages_select_bootstrap
-on public.messages
-for select
-to anon, authenticated
-using (true);
+-- messages: only conversation participants read; only the sender writes/edits/deletes
+create policy "messages_select" on public.messages
+  for select to authenticated
+  using (is_participant(conversation_id, auth.uid()));
 
-create policy messages_insert_bootstrap
-on public.messages
-for insert
-to anon, authenticated
-with check (true);
+create policy "messages_insert" on public.messages
+  for insert to authenticated
+  with check (
+    sender_id = auth.uid()
+    and is_participant(conversation_id, auth.uid())
+  );
 
-create policy messages_update_bootstrap
-on public.messages
-for update
-to anon, authenticated
-using (true)
-with check (true);
+create policy "messages_update_own" on public.messages
+  for update to authenticated
+  using (sender_id = auth.uid())
+  with check (sender_id = auth.uid());
 
-create policy presence_select_bootstrap
-on public.presence
-for select
-to anon, authenticated
-using (true);
+create policy "messages_delete_own" on public.messages
+  for delete to authenticated
+  using (sender_id = auth.uid());
 
-create policy presence_insert_bootstrap
-on public.presence
-for insert
-to anon, authenticated
-with check (true);
+-- read receipts: participants read; you only file receipts as yourself
+create policy "receipts_select" on public.read_receipts
+  for select to authenticated
+  using (is_participant(conversation_id, auth.uid()));
 
-create policy presence_update_bootstrap
-on public.presence
-for update
-to anon, authenticated
-using (true)
-with check (true);
+create policy "receipts_insert" on public.read_receipts
+  for insert to authenticated
+  with check (
+    reader_id = auth.uid()
+    and is_participant(conversation_id, auth.uid())
+  );
 
-create policy typing_events_select_bootstrap
-on public.typing_events
-for select
-to anon, authenticated
-using (true);
+-- typing: participants read; you only set your own row
+create policy "typing_select" on public.typing_events
+  for select to authenticated
+  using (is_participant(conversation_id, auth.uid()));
 
-create policy typing_events_insert_bootstrap
-on public.typing_events
-for insert
-to anon, authenticated
-with check (true);
+create policy "typing_insert_own" on public.typing_events
+  for insert to authenticated
+  with check (
+    user_id = auth.uid()
+    and is_participant(conversation_id, auth.uid())
+  );
 
-create policy typing_events_update_bootstrap
-on public.typing_events
-for update
-to anon, authenticated
-using (true)
-with check (true);
+create policy "typing_update_own" on public.typing_events
+  for update to authenticated
+  using (user_id = auth.uid())
+  with check (user_id = auth.uid());
 
-create policy read_receipts_select_bootstrap
-on public.read_receipts
-for select
-to anon, authenticated
-using (true);
+-- presence: friends (and you) can see it; you only write your own
+create policy "presence_select" on public.presence
+  for select to authenticated
+  using (auth.uid() = user_id or are_friends(auth.uid(), user_id));
 
-create policy read_receipts_insert_bootstrap
-on public.read_receipts
-for insert
-to anon, authenticated
-with check (true);
+create policy "presence_insert_own" on public.presence
+  for insert to authenticated
+  with check (auth.uid() = user_id);
 
-create policy read_receipts_update_bootstrap
-on public.read_receipts
-for update
-to anon, authenticated
-using (true)
-with check (true);
+create policy "presence_update_own" on public.presence
+  for update to authenticated
+  using (auth.uid() = user_id)
+  with check (auth.uid() = user_id);
 
--- Optional: a simple lookup query for later auth checks
--- select id, username, password_hash, pin_hash, recovery_phrase
--- from public.users
--- where username = $1;
+-- encrypted backups: strictly your own blob (used later for multi-device)
+create policy "backups_select_own" on public.encrypted_backups
+  for select to authenticated
+  using (auth.uid() = user_id);
+
+create policy "backups_insert_own" on public.encrypted_backups
+  for insert to authenticated
+  with check (auth.uid() = user_id);
+
+create policy "backups_update_own" on public.encrypted_backups
+  for update to authenticated
+  using (auth.uid() = user_id)
+  with check (auth.uid() = user_id);
+
+-- ---------- 5) REALTIME (RLS-filtered; works only for logged-in clients) ----------
+
+alter publication supabase_realtime add table public.messages;
+alter publication supabase_realtime add table public.friend_requests;
+alter publication supabase_realtime add table public.typing_events;
+alter publication supabase_realtime add table public.presence;
+alter publication supabase_realtime add table public.read_receipts;
+
+-- ---------- 6) GRANTS (RLS is the boundary; grants are the door) ----------
+
+grant usage on schema public to anon, authenticated, service_role;
+grant all on all tables in schema public to authenticated, service_role;

@@ -8,18 +8,19 @@
 **YOUR ROLE:** You are an expert mobile developer, security engineer, and patient coding mentor for an absolute beginner. Your tone is encouraging, precise, and jargon-free. 
 
 **MANDATORY RULES FOR THIS SESSION (NON-NEGOTIABLE):**
-1. **NO CUSTOM CRYPTO:** You are STRICTLY FORBIDDEN from writing custom encryption math. You MUST only use `tweetnacl` and `react-native-quick-crypto` via standard library implementations. The backend ONLY stores encrypted blobs.
-2. **ZERO BUDGET:** You may ONLY recommend free tiers (Supabase Free, GitHub Free, EAS Free). NEVER suggest paid services, credits, or trials.
-3. **ONE FILE AT A TIME:** Never give me snippets. Give me ONE complete, fully copy-pasteable file at a time. 
-4. **EXACT DEBUGGING:** If I paste an error, do not ask me to figure it out. Give me the EXACT replacement code for the broken file immediately.
-5. **30-MINUTE PACING:** Break every task into micro-steps that take less than 30 minutes. 
-6. **STRICT CHECKPOINTS:** At the end of every phase, you MUST STOP. Do not proceed until I explicitly type: *"Phase X done. Proceed to Phase Y."*
-7. **USE @WORKSPACE:** Always reference the actual files in the repository using `@workspace` context.
+1. **NO CUSTOM CRYPTO:** You are STRICTLY FORBIDDEN from writing custom encryption math. You MUST only use `tweetnacl` via standard library implementations. The backend ONLY stores encrypted blobs.
+2. **RLS IS THE SECURITY BOUNDARY:** Every Supabase table must have Row Level Security enabled with policies keyed to auth.uid(). The anon role may do nothing except sign up and sign in. Shared reads go through SECURITY DEFINER SQL functions. Never write a policy containing using (true) or with check (true).
+3. **ZERO BUDGET:** You may ONLY recommend free tiers (Supabase Free, GitHub Free, EAS Free). NEVER suggest paid services, credits, or trials.
+4. **ONE FILE AT A TIME:** Never give me snippets. Give me ONE complete, fully copy-pasteable file at a time.
+5. **EXACT DEBUGGING:** If I paste an error, do not ask me to figure it out. Give me the EXACT replacement code for the broken file immediately.
+6. **30-MINUTE PACING:** Break every task into micro-steps that take less than 30 minutes.
+7. **STRICT CHECKPOINTS:** At the end of every phase, you MUST STOP. Do not proceed until I explicitly type: *"Phase X done. Proceed to Phase Y."*
+8. **USE @WORKSPACE:** Always reference the actual files in the repository using `@workspace` context.
 
 ---
 
 ## 🚀 PART 2: EXECUTIVE SUMMARY & VISION
-**Homy** is a 100% free, private, End-to-End Encrypted (E2EE) Android messenger for a closed circle of friends. It features a Discord-inspired, pixel-perfect UI, Signal-grade forward secrecy, and zero financial cost. Built entirely in the cloud by a solo beginner, it distributes via manual APK and auto-updates itself. Every single interaction (messages, typing, receipts, reactions) is E2EE. No plaintext ever touches the server.
+**Homy** is a 100% free, private, End-to-End Encrypted (E2EE) Android messenger for a closed circle of friends. It features a Discord-inspired, pixel-perfect UI, the server never sees plaintext, and zero financial cost. Built entirely in the cloud by a solo beginner, it distributes via manual APK and auto-updates itself. Every single interaction (messages, typing, receipts, reactions) is E2EE. No plaintext ever touches the server.
 
 ---
 
@@ -55,13 +56,26 @@
 
 ## 💬 PART 4: CORE FEATURES & FUNCTIONALITY
 **4.1. Authentication & Identity**
-- **Username:** 3-20 chars, case-sensitive. No phone/email.
-- **Password:** No requirements (user decides).
-- **Recovery:** 12-word BIP-39 Secret Recovery Phrase. If lost, account/keys are gone forever.
-- **Multi-Device:** Achieved via an encrypted backup of the local DB and keys uploaded to the server, decryptable only via the 12-word seed or password.
+- Auth provider: Supabase Auth. Each account is created with a hidden internal
+  email <random-uuid>@users.homy.app plus the user's password. The username lives
+  in a profiles table. The user never sees the email.
+- Login: username + password on any device. The app maps the username
+  deterministically to the hidden internal email <username>@users.homy.app
+  and calls signInWithPassword. The user never sees this email.
+- Username rules: 3–20 chars, lowercase letters, numbers, underscore only
+  (^[a-z0-9_]{3,20}$). Stored lowercase, lookups case-insensitive.
+- Password: no complexity rules; minimum 6 characters (platform minimum).
+- Recovery: a 12-word BIP-39 phrase encrypts the multi-device backup. Lost
+  phrase = history unrestorable on a new device (account still reachable via
+  password).
+- No phone numbers or real emails are ever collected.
 
 **4.2. Messaging Lifecycle (All E2EE)**
-- **Forward Secrecy:** Implements simplified X3DH and Double Ratchet algorithm.
+- Encryption model: per-conversation keys derived via X25519 key agreement
+  (nacl.scalarMult), never uploaded. Message bodies, reactions, edits, deletes,
+  and media are end-to-end encrypted; typing and presence remain transport
+  metadata (as in Signal). Forward secrecy via a symmetric ratchet is a planned
+  hardening milestone.
 - **Storage:** Real-time, locally stored in `expo-sqlite`.
 - **Editing:** Allowed within 1 hour of sending. Shows a subtle *(edited)* tag.
 - **Deleting:** "Delete for Everyone" completely vanishes the message from both devices and server (no tombstone).
@@ -85,9 +99,10 @@
 
 ## 🏗️ PART 5: TECHNICAL ARCHITECTURE & STACK
 - **Frontend:** React Native + Expo (Managed Workflow). Tested 100% via Expo Go.
-- **Backend:** Supabase (Free Tier). PostgreSQL + Realtime WebSockets.
+- **Backend:** Supabase (Free Tier). Supabase Auth + PostgreSQL + Realtime + Storage. RLS enforced on every table.
 - **Local DB:** `expo-sqlite` for storing decrypted messages locally.
-- **E2EE Library:** `react-native-quick-crypto` + `tweetnacl`.
+- **E2EE Library:** `tweetnacl` (X25519 + secretbox) and `expo-crypto` for randomness. No other crypto libraries.
+- **Constraint:** No native-module dependencies; everything must run in Expo Go.
 - **Push Notifications:** Foreground only. No background FCM (zero budget).
 - **Infra Hacks:** 
   - *Keep-Alive:* GitHub Actions cron job pings Supabase every 5 mins.
