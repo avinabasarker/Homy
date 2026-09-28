@@ -76,9 +76,8 @@ export function decodeBytesFromPostgresBytea(value: string) {
   return hexToBytes(value);
 }
 
-function perUserKey(prefix: string, userId: string) {
-  return `${prefix}:${userId}`;
-}
+// expo-secure-store forbids ':' and other symbols — use '_' only.
+const ssKey = (base: string, userId: string): string => `${base}_${userId}`;
 
 function internalEmail(username: string) {
   return `${username}@users.homy.app`;
@@ -173,7 +172,7 @@ export async function setPin(userId: string, pin: string): Promise<boolean> {
     saltHex: bytesToHex(salt),
     hashHex: bytesToHex(derivePinHash(pin, salt)),
   };
-  await SecureStore.setItemAsync(perUserKey('homy_pin', userId), JSON.stringify(payload));
+  await SecureStore.setItemAsync(ssKey('homy_pin', userId), JSON.stringify(payload));
   return true;
 }
 
@@ -182,7 +181,7 @@ export async function verifyPin(userId: string, pin: string): Promise<boolean> {
     return false;
   }
 
-  const raw = await SecureStore.getItemAsync(perUserKey('homy_pin', userId));
+  const raw = await SecureStore.getItemAsync(ssKey('homy_pin', userId));
   if (!raw) {
     return false;
   }
@@ -197,7 +196,7 @@ export async function verifyPin(userId: string, pin: string): Promise<boolean> {
 }
 
 export async function ensureDeviceKeys(userId: string): Promise<void> {
-  const privateKeyName = perUserKey('homy_id_sk', userId);
+  const privateKeyName = ssKey('homy_id_sk', userId);
   if (await SecureStore.getItemAsync(privateKeyName)) {
     return;
   }
@@ -210,8 +209,8 @@ export async function ensureDeviceKeys(userId: string): Promise<void> {
   const prekeySecret = bytesToHex(prekey.secretKey);
 
   await SecureStore.setItemAsync(privateKeyName, identitySecret);
-  await SecureStore.setItemAsync(perUserKey('homy_id_pk', userId), identityPublic);
-  await SecureStore.setItemAsync(perUserKey('homy_prekey_sk', userId), prekeySecret);
+  await SecureStore.setItemAsync(ssKey('homy_id_pk', userId), identityPublic);
+  await SecureStore.setItemAsync(ssKey('homy_prekey_sk', userId), prekeySecret);
 
   const { error: identityError } = await client.from('public_keys').upsert({
     user_id: userId,
@@ -270,10 +269,10 @@ export async function registerAccount(
   }
 
   const userId = data.user.id;
-  await SecureStore.setItemAsync(perUserKey('homy_id_sk', userId), bytesToHex(identity.secretKey));
-  await SecureStore.setItemAsync(perUserKey('homy_id_pk', userId), bytesToHex(identity.publicKey));
-  await SecureStore.setItemAsync(perUserKey('homy_prekey_sk', userId), bytesToHex(prekey.secretKey));
-  await SecureStore.setItemAsync(perUserKey('homy_recovery', userId), mnemonic);
+  await SecureStore.setItemAsync(ssKey('homy_id_sk', userId), bytesToHex(identity.secretKey));
+  await SecureStore.setItemAsync(ssKey('homy_id_pk', userId), bytesToHex(identity.publicKey));
+  await SecureStore.setItemAsync(ssKey('homy_prekey_sk', userId), bytesToHex(prekey.secretKey));
+  await SecureStore.setItemAsync(ssKey('homy_recovery', userId), mnemonic);
 
   const { error: identityError } = await client.from('public_keys').upsert({
     user_id: userId,
@@ -325,7 +324,7 @@ export async function loginAccount(
   const profile = await readProfile(userId);
   await ensureDeviceKeys(userId);
   await upsertPresence(userId, true);
-  const needsPinSetup = !(await SecureStore.getItemAsync(perUserKey('homy_pin', userId)));
+  const needsPinSetup = !(await SecureStore.getItemAsync(ssKey('homy_pin', userId)));
 
   return { userId, username: profile.username, needsPinSetup };
 }
@@ -341,7 +340,7 @@ export async function restoreSession(): Promise<{ userId: string; username: stri
     const userId = data.session.user.id;
     const profile = await readProfile(userId);
     await ensureDeviceKeys(userId);
-    const needsPinSetup = !(await SecureStore.getItemAsync(perUserKey('homy_pin', userId)));
+    const needsPinSetup = !(await SecureStore.getItemAsync(ssKey('homy_pin', userId)));
     return { userId, username: profile.username, needsPinSetup };
   } catch {
     return null;
